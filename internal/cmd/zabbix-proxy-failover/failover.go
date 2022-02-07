@@ -3,13 +3,10 @@ package zabbix_proxy_failover
 import (
 	"context"
 	"errors"
+	operation2 "github.com/bangunindo/zabbix-proxy-failover/internal/operation"
 	"github.com/bangunindo/zabbix-proxy-failover/pkg/api"
 	logger "github.com/sirupsen/logrus"
 )
-
-func ctxRequestTimeout(ctx context.Context) (context.Context, func()) {
-	return context.WithTimeout(ctx, config.Check.Timeout)
-}
 
 func Failover(ctx context.Context) error {
 	log := logger.WithField("module", "failover")
@@ -47,7 +44,7 @@ func Failover(ctx context.Context) error {
 func getZabbix(ctx context.Context) (api.ZabbixAPI, error) {
 	log := logger.WithField("module", "failover.getZabbix")
 	z := api.GetZabbixAPI(config.Zabbix.URL)
-	ctxTimeout, cancel := ctxRequestTimeout(ctx)
+	ctxTimeout, cancel := operation2.CtxRequestTimeout(ctx, config)
 	defer cancel()
 	log.Debug("logging in to zabbix")
 	err := z.LoginUserPassCtx(ctxTimeout, api.Login{
@@ -60,7 +57,7 @@ func getZabbix(ctx context.Context) (api.ZabbixAPI, error) {
 
 func doFailover(ctx context.Context, z api.ZabbixAPI) error {
 	log := logger.WithField("module", "failover.process")
-	ctxTimeout, cancel := ctxRequestTimeout(ctx)
+	ctxTimeout, cancel := operation2.CtxRequestTimeout(ctx, config)
 	defer cancel()
 	if err := z.Ping(ctxTimeout); err != nil {
 		log.Warnln("failed connecting to zabbix api")
@@ -71,7 +68,7 @@ func doFailover(ctx context.Context, z api.ZabbixAPI) error {
 	for _, proxy := range config.Proxy {
 		proxyIDs = append(proxyIDs, proxy.ProxyID)
 	}
-	ctxTimeout, cancel = ctxRequestTimeout(ctx)
+	ctxTimeout, cancel = operation2.CtxRequestTimeout(ctx, config)
 	defer cancel()
 	proxies, err := z.GetProxyCtx(ctxTimeout, api.ReqProxy{ProxyIDs: proxyIDs})
 	if err != nil {
@@ -83,8 +80,8 @@ func doFailover(ctx context.Context, z api.ZabbixAPI) error {
 		return errors.New("proxy count mismatch")
 	}
 	log.Debug("analyzing any offline proxies")
-	operation := Operation{}
-	if err = operation.LoadProxy(ctx, z, proxies); err != nil {
+	operation := operation2.Operation{}
+	if err = operation.LoadProxy(ctx, z, config, proxies); err != nil {
 		log.Warnln("failed loading proxy data")
 		return errors.New("failed loading proxy data")
 	}

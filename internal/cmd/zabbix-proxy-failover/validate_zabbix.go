@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/bangunindo/zabbix-proxy-failover/internal/operation"
 	"github.com/bangunindo/zabbix-proxy-failover/pkg/api"
 	logger "github.com/sirupsen/logrus"
 )
@@ -13,7 +14,7 @@ func ValidateZabbix(ctx context.Context) error {
 	log.Debug("getting zabbix client")
 	client := api.GetZabbixAPI(config.Zabbix.URL)
 	log.Info("logging in to zabbix")
-	ctxTimeout, cancel := ctxRequestTimeout(ctx)
+	ctxTimeout, cancel := operation.CtxRequestTimeout(ctx, config)
 	defer cancel()
 	err := client.LoginUserPassCtx(ctxTimeout, api.Login{
 		User:     config.Zabbix.User,
@@ -33,7 +34,7 @@ func ValidateZabbix(ctx context.Context) error {
 	}(client)
 	errorHappened := false
 	log.Debug("test api server")
-	ctxTimeout, cancel = ctxRequestTimeout(ctx)
+	ctxTimeout, cancel = operation.CtxRequestTimeout(ctx, config)
 	defer cancel()
 	if err := client.Ping(ctx); err != nil {
 		errorHappened = true
@@ -43,7 +44,7 @@ func ValidateZabbix(ctx context.Context) error {
 outerLoop:
 	for i, proxy := range config.Proxy {
 		proxyLog := log.WithField("location", fmt.Sprintf("proxy[%d]", i))
-		ctxTimeout, cancel = ctxRequestTimeout(ctx)
+		ctxTimeout, cancel = operation.CtxRequestTimeout(ctx, config)
 		log.Debug("checking proxyid ", proxy.ProxyID)
 		proxyZbx, err := client.GetProxyCtx(ctxTimeout, api.ReqProxy{ProxyIDs: []int{proxy.ProxyID}})
 		if err != nil || len(proxyZbx) == 0 {

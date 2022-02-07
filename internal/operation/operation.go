@@ -1,90 +1,19 @@
-package zabbix_proxy_failover
+package operation
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	iconfig "github.com/bangunindo/zabbix-proxy-failover/internal/config"
 	"github.com/bangunindo/zabbix-proxy-failover/pkg/api"
 	logger "github.com/sirupsen/logrus"
-	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	wa "github.com/bangunindo/zabbix-proxy-failover/pkg/walker-alias"
 )
 
-type HostListOp struct {
-	list         []*api.Host
-	index        map[int]int
-	indexByProxy map[int][]int
-}
-
-func (h *HostListOp) Len() int {
-	return len(h.list)
-}
-
-func (h *HostListOp) List() []*api.Host {
-	return h.list
-}
-
-func (h *HostListOp) Append(host *api.Host) {
-	if h.index == nil {
-		h.index = make(map[int]int)
-	}
-	if h.indexByProxy == nil {
-		h.indexByProxy = make(map[int][]int)
-	}
-	h.list = append(h.list, host)
-	idx := len(h.list) - 1
-	h.index[host.HostID] = idx
-	h.indexByProxy[host.ProxyID] = append(h.indexByProxy[host.ProxyID], idx)
-}
-
-func (h *HostListOp) RebuildIndex() {
-	h.index = make(map[int]int)
-	h.indexByProxy = make(map[int][]int)
-	for i, host := range h.list {
-		h.index[host.HostID] = i
-		h.indexByProxy[host.ProxyID] = append(h.indexByProxy[host.ProxyID], i)
-	}
-}
-
-func (h *HostListOp) SwapHost(h2 *HostListOp, i, j int) {
-	h.list[i], h2.list[j] = h2.list[j], h.list[i]
-}
-
-func (h *HostListOp) HostsInProxy(proxyID int) *HostListOp {
-	hostList := new(HostListOp)
-	for idx := range h.indexByProxy[proxyID] {
-		hostList.Append(h.list[idx])
-	}
-	return hostList
-}
-
-func (h *HostListOp) ByHostIDIdx(hostID int) (int, error) {
-	idx, ok := h.index[hostID]
-	if !ok {
-		return 0, errors.New("can't find hostid")
-	} else {
-		return idx, nil
-	}
-}
-
-func (h *HostListOp) MD5() string {
-	hasher := md5.New()
-	hasher.Write([]byte(" "))
-	orderedHost := h.list[:]
-	sort.Slice(orderedHost, func(i, j int) bool {
-		return orderedHost[i].HostID < orderedHost[j].HostID
-	})
-	for _, host := range orderedHost {
-		hasher.Write([]byte(strconv.Itoa(host.HostID)))
-	}
-	return hex.EncodeToString(hasher.Sum(nil))
+func CtxRequestTimeout(ctx context.Context, config *iconfig.Config) (context.Context, func()) {
+	return context.WithTimeout(ctx, config.Check.Timeout)
 }
 
 type ProxyOp struct {
@@ -113,118 +42,14 @@ func (p *ProxyOp) Equals(proxy *ProxyOp) bool {
 	return p.ApiProxy.ProxyID == proxy.ApiProxy.ProxyID
 }
 
-type ProxyListOp struct {
-	list          []*ProxyOp
-	bucketKey     string
-	indexByID     map[int]int
-	indexByStatus map[bool][]int
-	indexByTag    map[[2]string][]int
-	indexByHostID map[int]int
-	totalWeight   int
-}
-
-func (p *ProxyListOp) BucketKey() string {
-	if p.bucketKey == "" {
-		var proxyIDs []string
-		sortedProxy := p.list[:]
-		sort.Slice(sortedProxy, func(i, j int) bool {
-			return sortedProxy[i].ApiProxy.ProxyID < sortedProxy[j].ApiProxy.ProxyID
-		})
-		for _, proxy := range sortedProxy {
-			proxyIDs = append(proxyIDs, strconv.Itoa(proxy.ApiProxy.ProxyID))
-		}
-		p.bucketKey = strings.Join(proxyIDs, ",")
-	}
-	return p.bucketKey
-}
-
-func (p *ProxyListOp) List() []*ProxyOp {
-	return p.list
-}
-
-func (p *ProxyListOp) Len() int {
-	return len(p.list)
-}
-
-func (p *ProxyListOp) TotalWeight() int {
-	return p.totalWeight
-}
-
-func (p *ProxyListOp) MarkAs(proxy *ProxyOp, isDown bool) {
-	proxy.MarkAs(isDown)
-	p.indexByStatus = make(map[bool][]int)
-	for i, proxy := range p.list {
-		p.indexByStatus[proxy.isDown] = append(p.indexByStatus[proxy.isDown], i)
-	}
-}
-
-func (p *ProxyListOp) Append(proxy *ProxyOp) {
-	if p.indexByID == nil {
-		p.indexByID = make(map[int]int)
-	}
-	if p.indexByStatus == nil {
-		p.indexByStatus = make(map[bool][]int)
-	}
-	if p.indexByTag == nil {
-		p.indexByTag = make(map[[2]string][]int)
-	}
-	if p.indexByHostID == nil {
-		p.indexByHostID = make(map[int]int)
-	}
-	p.list = append(p.list, proxy)
-	lastIdx := len(p.list) - 1
-	p.indexByID[proxy.ConfProxy.ProxyID] = lastIdx
-	p.indexByStatus[proxy.isDown] = append(p.indexByStatus[proxy.isDown], lastIdx)
-	for _, tag := range proxy.ConfProxy.Tag {
-		key := [2]string{tag.Name, tag.Value}
-		p.indexByTag[key] = append(p.indexByTag[key], lastIdx)
-	}
-	for _, host := range proxy.Hosts.List() {
-		p.indexByHostID[host.HostID] = lastIdx
-	}
-	p.totalWeight += proxy.ConfProxy.Weight
-}
-
-func (p *ProxyListOp) SearchByID(proxyID int) *ProxyOp {
-	if idx, ok := p.indexByID[proxyID]; ok {
-		return p.list[idx]
-	} else {
-		return nil
-	}
-}
-
-func hostProxyTagMatch(host *api.Host, proxy *ProxyOp) bool {
-	if len(proxy.IndexedTag) > 0 && len(host.Tag) == 0 {
-		return false
-	}
-	match := true
-	for _, hTag := range host.Tag {
-		if pTag, ok := proxy.IndexedTag[hTag.Tag]; ok && !pTag[hTag.Value] {
-			match = false
-		}
-	}
-	return match
-}
-
-func (p *ProxyListOp) ProxyMatchByTag(host *api.Host, excludeDown bool) ProxyListOp {
-	var proxyList ProxyListOp
-	for _, proxy := range p.list {
-		if excludeDown && proxy.IsDown() {
-			continue
-		}
-		if hostProxyTagMatch(host, proxy) {
-			proxyList.Append(proxy)
-		}
-	}
-	return proxyList
-}
-
 type Operation struct {
 	allProxies ProxyListOp
 	allHosts   HostListOp
+	config     *iconfig.Config
 }
 
-func (o *Operation) LoadProxy(ctx context.Context, z api.ZabbixAPI, proxies []api.Proxy) error {
+func (o *Operation) LoadProxy(ctx context.Context, z api.ZabbixAPI, config *iconfig.Config, proxies []api.Proxy) error {
+	o.config = config
 	log := logger.WithField("module", "operation.load_proxy")
 	proxyIDList := map[int]bool{}
 	apiProxyByID := map[int]api.Proxy{}
@@ -234,7 +59,7 @@ func (o *Operation) LoadProxy(ctx context.Context, z api.ZabbixAPI, proxies []ap
 		proxyIDList[proxy.ProxyID] = true
 	}
 	confProxyByID := map[int]iconfig.Proxy{}
-	for _, proxy := range config.Proxy {
+	for _, proxy := range o.config.Proxy {
 		confProxyByID[proxy.ProxyID] = proxy
 		proxyIDList[proxy.ProxyID] = true
 	}
@@ -251,7 +76,7 @@ func (o *Operation) LoadProxy(ctx context.Context, z api.ZabbixAPI, proxies []ap
 			ConfProxy: confProxyByID[proxyID],
 			ApiProxy:  apiProxyByID[proxyID],
 		}
-		ctxTimeout, cancel := ctxRequestTimeout(ctx)
+		ctxTimeout, cancel := CtxRequestTimeout(ctx, o.config)
 		logProxy.Debug("populating host information")
 		if hosts, err := proxy.ApiProxy.GetHosts(ctxTimeout, z); err != nil {
 			cancel()
@@ -284,10 +109,10 @@ func (o *Operation) EvaluateStatus(ctx context.Context, z api.ZabbixAPI) error {
 	for _, proxy := range o.allProxies.List() {
 		logProxy := log.WithField("proxy_id", proxy.ApiProxy.ProxyID)
 		logProxy.Debug("evaluating")
-		switch config.Failover.Method {
+		switch o.config.Failover.Method {
 		case iconfig.TRIGGER:
 			logProxy.Debug("evaluating trigger")
-			ctxTimeout, cancel := ctxRequestTimeout(ctx)
+			ctxTimeout, cancel := CtxRequestTimeout(ctx, o.config)
 			if trigger, err := z.GetTriggerCtx(ctxTimeout, api.ReqTrigger{
 				TriggerIDs: []int{*proxy.ConfProxy.TriggerID},
 				Output:     []string{"triggerid", "value", "lastchange"},
@@ -305,14 +130,14 @@ func (o *Operation) EvaluateStatus(ctx context.Context, z api.ZabbixAPI) error {
 				if *trigger[0].Value == api.PROBLEM {
 					o.allProxies.MarkAs(proxy, true)
 				}
-				if config.Failover.LockHostAfter != nil &&
-					now.Sub(trigger[0].LastChange.Time) >= *config.Failover.LockHostAfter {
+				if o.config.Failover.LockHostAfter != nil &&
+					now.Sub(trigger[0].LastChange.Time) >= *o.config.Failover.LockHostAfter {
 					proxy.lockHost = true
 				}
 			}
 		case iconfig.LASTSEEN:
 			logProxy.Debug("evaluating last_seen")
-			if now.Sub(proxy.ApiProxy.LastAccess.Time) >= *config.Failover.Duration {
+			if now.Sub(proxy.ApiProxy.LastAccess.Time) >= *o.config.Failover.Duration {
 				o.allProxies.MarkAs(proxy, true)
 			}
 		}
@@ -333,6 +158,7 @@ type HostRoute struct {
 	proxyBucketRandom map[string]*wa.WalkerAlias
 	stats             HostRouteStats
 	seed              int64
+	alwaysBalance     bool
 }
 
 func (h *HostRoute) Route(host *api.Host, proxyList ProxyListOp) error {
@@ -360,7 +186,7 @@ func (h *HostRoute) Route(host *api.Host, proxyList ProxyListOp) error {
 			h.stats.TagChange++
 		}
 		destProxy.PlannedHost.Append(host)
-	} else if (!config.Failover.AlwaysBalance || prevProxy.LockHost()) && !prevProxy.IsDown() {
+	} else if (!h.alwaysBalance || prevProxy.LockHost()) && !prevProxy.IsDown() {
 		h.stats.DoNothing++
 		prevProxy.PlannedHost.Append(host)
 	} else {
@@ -454,6 +280,7 @@ func (o *Operation) HostPlanning() error {
 	log := logger.WithField("module", "operation.host_plan")
 	log.Debug("starting host planning")
 	var hostRoute HostRoute
+	hostRoute.alwaysBalance = o.config.Failover.AlwaysBalance
 	for _, host := range o.allHosts.List() {
 		if err := hostRoute.Route(host, o.allProxies); err != nil {
 			return err
@@ -490,7 +317,7 @@ func (o *Operation) Drain(ctx context.Context, z api.ZabbixAPI) error {
 			for _, host := range proxy.PlannedHost.List() {
 				plannedHost = append(plannedHost, *host)
 			}
-			ctxTimeout, cancel := ctxRequestTimeout(ctx)
+			ctxTimeout, cancel := CtxRequestTimeout(ctx, o.config)
 			if err := proxy.ApiProxy.UpdateHosts(ctxTimeout, z, plannedHost); err != nil {
 				logProxy.WithError(err).Warnln("failed updating hosts")
 				cancel()
